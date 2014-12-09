@@ -81,8 +81,8 @@ function newF(eqn::Equation;
         t, dt, r, dr, u, du = extracty(y,dy,npts,npde)
         dudr, dudt = computederivatives(r,dr,u,du)
 
-        M    = smoothen(eqn.monitor(r,view(u,:,1),view(dudr,:,1)); args...)
-        gval = eqn.sundman(r,view(u,:,1),view(dudr,:,1))
+        M    = smoothen(eqn.monitor(r,u,dudr); args...)
+        gval = eqn.sundman(r,u,dudr)
 
         res  = zero(y)
         res[1]          = dt-gval                                  # Sundman transform equations
@@ -109,11 +109,14 @@ function meshinit(eqn,
     dxi  = convert(T,1/(npts-1))
 
     ur = zero(r0)
+    dudr = zero(uinit(r0))          # du/dr
 
     function F(t,r,dr)
         u    = uinit(r)
-        fdd!(ur,u,r,1,3)
-        M    = smoothen(eqn.monitor(r,u,ur); args...)
+        for j = 1:size(u,2)
+            fdd!(view(dudr,:,j),view(u,:,j),r,1,3)
+        end
+        M    = smoothen(eqn.monitor(r,u,dudr); args...)
         res  = copy(dr)
         for i = 2:npts-1
             res[i]=epsilon*(dr[i]*dxi^2-gamma*(dr[i-1]+dr[i+1]-2*dr[i]))-( (M[i+1]+M[i])*(r[i+1]-r[i])-(M[i]+M[i-1])*(r[i]-r[i-1]) )
@@ -154,8 +157,7 @@ function solve(eqn   :: Equation,
     dr = convert(T,(rspan[2]-rspan[1])/(npts-1))
     r0 = [rspan[1]:dr:rspan[2]]
     r0 = meshinit(eqn, r0, uinit; args...)
-    u0 = zeros(npts,npde)
-    u0[:,1]=uinit(r0)
+    u0 = uinit(r0)
 
     # generate y0
     ny=npts*(npde+1)+1
