@@ -5,7 +5,7 @@ using ArrayViews
 using DASSL
 using Iterators
 
-export Equation, solve
+export Equation, solve, extracty, physicalres!, movingmeshres, epsilon_eval, meshinit, computederivatives
 
 abstract Equation
 
@@ -20,18 +20,24 @@ end
 function extracty(y,dy,npts,npde)
     t   =  y[1]
     dt  = dy[1]
-    r   = view( y,2:npts+1)
-    dr  = view(dy,2:npts+1)
-    u   = reshape_view( view( y,npts+2:length(y)), (npts, npde))
-    du  = reshape_view( view(dy,npts+2:length(y)), (npts, npde))
+    # r   = view( y,2:npts+1)
+    # dr  = view(dy,2:npts+1)
+    # u   = reshape_view( view( y,npts+2:length(y)), (npts, npde))
+    # du  = reshape_view( view(dy,npts+2:length(y)), (npts, npde))
+    r   =  y[2:npts+1]
+    dr  = dy[2:npts+1]
+    u   = reshape(  y[npts+2:length(y)], npts, npde)
+    du  = reshape( dy[npts+2:length(y)], npts, npde)
     return t, dt, r, dr, u, du
 end
 
 function computederivatives(r,dr,u,du,derivative)
     dudr = zero(u)          # du/dr
     dudt = zero(u)
+    tmp = Array(eltype(u),size(u,1))
     for j = 1:size(u,2)
-        derivative(view(dudr,:,j),view(u,:,j),r)
+        derivative(tmp,u[:,j],r)
+        dudr[:,j] = tmp
         for i = 1:size(u,1)
             dudt[i,j] = du[i,j]-dr[i]*dudr[i,j]
         end
@@ -66,70 +72,43 @@ function movingmeshres(r,dr,M,gamma,gval,epsilon)
     return resr
 end
 
-function physicalres(rhs,r,u,dudt,gval)
-    rhsval = rhs(r,u)
-    npts, npde = size(dudt)
-    resu = -dudt+gval*rhsval
-    for j = 1:size(u,2)
+function physicalres!(resu,rhsval,r,u,dudt,gval)
+    npts, npde = size(u)
+    for j = 1:npde
         resu[1,j] = u[1,j]          # enforce boundary conditions u(0,t)=0
+        for i = 1:npts
+            resu[i,j] = gval*rhsval[i,j]-dudt[i,j]
+        end
     end
-    return reshape(resu,npts*npde)
 end
 
-function newF(eqn::Equation;
-              epsilon=1e-5,
-              gamma=2,
-              derivative=(du,u,r)->fdd!(du,u,r,1,3),
-              args...)
-
-    function F(tau,y,dy)
-        npde = eqn.npde
-
-        npts = int((length(y)-1)/(npde+1))
-
-        t, dt, r, dr, u, du = extracty(y,dy,npts,npde)
-        dudr, dudt = computederivatives(r,dr,u,du,derivative)
-
-        M    = smoothen(eqn.monitor(r,u,dudr); args...)
-        gval = eqn.sundman(r,u,dudr)
-        eps  = epsilon_eval(epsilon,r,u,dudr)
-
-        res  = zero(y)
-        res[1]          = dt-gval                                  # Sundman transform equations
-        res[2:npts+1]   = movingmeshres(r,dr,M,gamma,gval,eps) # moving mesh equations
-        res[npts+2:end] = physicalres(eqn.rhs,r,u,dudt,gval)       # physical equations
-
-        return res
-    end
-
-    return F
-
-end
 
 function meshinit(eqn,
-                  r0,
-                  uinit;
+                  uinit,
+                  nx;
+                  T = Float64,
                   epsilon = 1e-5,
                   gamma = 2,
                   derivative = (du,u,r)->fdd!(du,u,r,1,3),
                   args...)
 
     info("Mesh initialization: Start")
-    T    = eltype(r0)
-    npts = length(r0)
-    dxi  = convert(T,1/(npts-1))
+    r0   = linspace(eqn.rspan...,nx)
+    dxi  = 1/(convert(T,nx)-1)
 
-    dudr = zero(uinit(r0))          # du/dr
+    dudr = zero(uinit(r0))      # du/dr
 
     function F(t,r,dr)
-        u    = uinit(r)
+        u    = uinit(r)::Matrix{T}
         for j = 1:size(u,2)
             derivative(view(dudr,:,j),view(u,:,j),r)
         end
         M   = smoothen(eqn.monitor(r,u,dudr); args...)
         ϵ   = epsilon_eval(epsilon,r,u,dudr)
-        res  = copy(dr)
-        for i = 2:npts-1
+        res  = zero(dr)
+        res[  1] = dr[  1]
+        res[end] = dr[end]
+        for i = 2:nx-1
             res[i]=ϵ*(dr[i]*dxi^2-gamma*(dr[i-1]+dr[i+1]-2*dr[i]))-( (M[i+1]+M[i])*(r[i+1]-r[i])-(M[i]+M[i-1])*(r[i]-r[i-1]) )
         end
         return res
@@ -157,42 +136,46 @@ end
 
 function solve(eqn   :: Equation,
                uinit :: Function;
-               npts  = 100,
-               rspan = [0,pi],
+               npts :: Int = 100,
                T     = Float64,
+               epsilon = 1e-5,
+               gamma = 2,
+               derivative = (du,u,r)->fdd!(du,u,r,1,3),
                args...)
 
-    npde = eqn.npde
-
-    # TODO remove the generation of initial data to another function
-
     # generate initial data
-    t0 = zero(T)
-    tau0 = zero(T)
-    dr = convert(T,(rspan[2]-rspan[1])/(npts-1))
-    r0 = [rspan[1]:dr:rspan[2]]
-    r0 = meshinit(eqn, r0, uinit; args...)
+    r0 = meshinit(eqn, uinit, npts; epsilon=epsilon, derivative=derivative, gamma=gamma, args...)
     u0 = uinit(r0)
+    resu = zero(u0)
+    y0 = vcat(eqn.t0,r0,vec(u0))
 
-    # generate y0
-    ny=npts*(npde+1)+1
-    y0=zeros(T,ny)
-    y0[1]=t0
-    y0[2:npts+1]=r0
-    u0view=reshape_view(view(y0,npts+2:ny),(npts,npde))
-    for j=1:npde, i=1:npts
-        u0view[i,j]=u0[i,j]
+    # dae to solve
+    function dae(tau,y,dy)
+        t, dt, r, dr, u, du = extracty(y,dy,npts,eqn.npde)::(T,T,Vector{T},Vector{T},Matrix{T},Matrix{T})
+        dudr, dudt = computederivatives(r,dr,u,du,derivative)
+
+        M    = smoothen(eqn.monitor(r,u,dudr); args...)
+        gval = eqn.sundman(r,u,dudr)::T
+        eps  = epsilon_eval(epsilon,r,u,dudr)::T
+        rhs  = eqn.rhs(r,u)
+
+        res  = zero(y)
+        res[1]          = dt-gval # Sundman transform equations
+        res[2:npts+1]   = movingmeshres(r,dr,M,gamma,gval,eps) # moving mesh equations
+        physicalres!(resu,rhs,r,u,dudt,gval) # physical equations
+        res[npts+2:end] = vec(resu)
+
+        return res
     end
-
-    F=newF(eqn; args...)
-    sol = dasslIterator(F, y0, tau0; args...)
 
     function extract_results(t,y,yt)
-        t = y[1]
+        t = y[1];
         x = y[2:npts+1]
-        u = reshape(y[npts+2:end],npts,npde)
+        u = reshape(y[npts+2:end],npts,eqn.npde)
         return t, x, u
     end
+
+    sol = dasslIterator(dae, y0, zero(T); args...)
 
     return imap(z->extract_results(z...),sol)
 
