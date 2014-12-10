@@ -9,6 +9,14 @@ export Equation, solve
 
 abstract Equation
 
+function epsilon_eval(eps::Function,r,u,ur)
+    return eps(r,u,ur)
+end
+
+function epsilon_eval(eps::Real,r,u,ur)
+    return eps
+end
+
 function extracty(y,dy,npts,npde)
     t   =  y[1]
     dt  = dy[1]
@@ -19,11 +27,11 @@ function extracty(y,dy,npts,npde)
     return t, dt, r, dr, u, du
 end
 
-function computederivatives(r,dr,u,du)
+function computederivatives(r,dr,u,du,derivative)
     dudr = zero(u)          # du/dr
     dudt = zero(u)
     for j = 1:size(u,2)
-        fdd!(view(dudr,:,j),view(u,:,j),r,1,3)
+        derivative(view(dudr,:,j),view(u,:,j),r)
         for i = 1:size(u,1)
             dudt[i,j] = du[i,j]-dr[i]*dudr[i,j]
         end
@@ -71,6 +79,7 @@ end
 function newF(eqn::Equation;
               epsilon=1e-5,
               gamma=2,
+              derivative=(du,u,r)->fdd!(du,u,r,1,3),
               args...)
 
     function F(tau,y,dy)
@@ -79,14 +88,15 @@ function newF(eqn::Equation;
         npts = int((length(y)-1)/(npde+1))
 
         t, dt, r, dr, u, du = extracty(y,dy,npts,npde)
-        dudr, dudt = computederivatives(r,dr,u,du)
+        dudr, dudt = computederivatives(r,dr,u,du,derivative)
 
         M    = smoothen(eqn.monitor(r,u,dudr); args...)
         gval = eqn.sundman(r,u,dudr)
+        eps  = epsilon_eval(epsilon,r,u,dudr)
 
         res  = zero(y)
         res[1]          = dt-gval                                  # Sundman transform equations
-        res[2:npts+1]   = movingmeshres(r,dr,M,gamma,gval,epsilon) # moving mesh equations
+        res[2:npts+1]   = movingmeshres(r,dr,M,gamma,gval,eps) # moving mesh equations
         res[npts+2:end] = physicalres(eqn.rhs,r,u,dudt,gval)       # physical equations
 
         return res
@@ -101,6 +111,7 @@ function meshinit(eqn,
                   uinit;
                   epsilon = 1e-5,
                   gamma = 2,
+                  derivative = (du,u,r)->fdd!(du,u,r,1,3),
                   args...)
 
     info("Mesh initialization: Start")
@@ -108,23 +119,29 @@ function meshinit(eqn,
     npts = length(r0)
     dxi  = convert(T,1/(npts-1))
 
-    ur = zero(r0)
     dudr = zero(uinit(r0))          # du/dr
 
     function F(t,r,dr)
         u    = uinit(r)
         for j = 1:size(u,2)
-            fdd!(view(dudr,:,j),view(u,:,j),r,1,3)
+            derivative(view(dudr,:,j),view(u,:,j),r)
         end
-        M    = smoothen(eqn.monitor(r,u,dudr); args...)
+        M   = smoothen(eqn.monitor(r,u,dudr); args...)
+        ϵ   = epsilon_eval(epsilon,r,u,dudr)
         res  = copy(dr)
         for i = 2:npts-1
-            res[i]=epsilon*(dr[i]*dxi^2-gamma*(dr[i-1]+dr[i+1]-2*dr[i]))-( (M[i+1]+M[i])*(r[i+1]-r[i])-(M[i]+M[i-1])*(r[i]-r[i-1]) )
+            res[i]=ϵ*(dr[i]*dxi^2-gamma*(dr[i-1]+dr[i+1]-2*dr[i]))-( (M[i+1]+M[i])*(r[i+1]-r[i])-(M[i]+M[i-1])*(r[i]-r[i-1]) )
         end
         return res
     end
 
-    tol = min(1,epsilon*1e7)
+    u0    = uinit(r0)
+    for j = 1:size(u0,2)
+        derivative(view(dudr,:,j),view(u0,:,j),r0)
+    end
+
+    ϵ   = epsilon_eval(epsilon,r0,u0,dudr)
+    tol = min(1,ϵ*1e7)
     err = Inf
     for (t,r,dr) in dasslIterator(F, r0, zero(T); reltol = dxi*tol, abstol = 1e-2*dxi*tol)
         err = norm(dr)*dxi
@@ -143,8 +160,6 @@ function solve(eqn   :: Equation,
                npts  = 100,
                rspan = [0,pi],
                T     = Float64,
-               taumax = 20,
-               stopcondition = u->false,
                args...)
 
     npde = eqn.npde
