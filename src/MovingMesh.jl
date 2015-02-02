@@ -5,7 +5,7 @@ using ArrayViews
 using DASSL
 using Iterators
 
-export Equation, solve, extracty, physicalres!, movingmeshres, epsilon_eval, meshinit, computederivatives
+export Equation, solve
 
 abstract Equation
 
@@ -36,7 +36,7 @@ function computederivatives(r,dr,u,du,derivative)
     dudt = zero(u)
     tmp = Array(eltype(u),size(u,1))
     for j = 1:size(u,2)
-        derivative(tmp,u[:,j],r)
+        derivative(tmp,view(u,:,j),r)
         dudr[:,j] = tmp
         for i = 1:size(u,1)
             dudt[i,j] = du[i,j]-dr[i]*dudr[i,j]
@@ -45,18 +45,21 @@ function computederivatives(r,dr,u,du,derivative)
     return dudr, dudt
 end
 
-# simple gaussian filter to smoothen the monitor function
-function smoothen(M; passes = 4, args...)
+# simple in-place gaussian filter to smoothen the monitor function
+function smoothen!(M; passes = 4, args...)
     if passes == 0
-        return M
+        return
     else
-        Msmooth = zero(M)
-        @simd for i = 2:length(M)-1
-            @inbounds Msmooth[i]=(M[i-1]+2M[i]+M[i+1])/4
+        # forward pass
+        for i = 1:length(M)-1
+            M[i]=(M[i+1]+M[i])/2
         end
-        Msmooth[1]=(M[1]+M[2])/2
-        Msmooth[end]=(M[end-1]+M[end])/2
-        return smoothen(Msmooth, passes=passes-1)
+        M[end] = M[end-1]
+        # backward pass
+        for i = length(M):-1:2
+            M[i]=(M[i]+M[i-1])/2
+        end
+        smoothen!(M, passes=passes-1)
     end
 end
 
@@ -103,7 +106,8 @@ function meshinit(eqn,
         for j = 1:size(u,2)
             derivative(view(dudr,:,j),view(u,:,j),r)
         end
-        M   = smoothen(eqn.monitor(r,u,dudr); args...)
+        M = eqn.monitor(r,u,dudr)::Array{T}
+        smoothen!(M; args...)
         ϵ   = epsilon_eval(epsilon,r,u,dudr)
         res  = zero(dr)
         res[  1] = dr[  1]
@@ -144,7 +148,7 @@ function solve(eqn   :: Equation,
                args...)
 
     # generate initial data
-    r0 = meshinit(eqn, uinit, npts; epsilon=epsilon, derivative=derivative, gamma=gamma, args...)
+    r0 = meshinit(eqn, uinit, npts; epsilon=epsilon, derivative=derivative, gamma=gamma, T=T, args...)
     u0 = uinit(r0)
     resu = zero(u0)
     y0 = vcat(eqn.t0,r0,vec(u0))
@@ -154,12 +158,13 @@ function solve(eqn   :: Equation,
         t, dt, r, dr, u, du = extracty(y,dy,npts,eqn.npde)::(T,T,Vector{T},Vector{T},Matrix{T},Matrix{T})
         dudr, dudt = computederivatives(r,dr,u,du,derivative)
 
-        M    = smoothen(eqn.monitor(r,u,dudr); args...)
+        M    = eqn.monitor(r,u,dudr)::Array{T}
+        smoothen!(M; args...)
         gval = eqn.sundman(r,u,dudr)::T
         eps  = epsilon_eval(epsilon,r,u,dudr)::T
         rhs  = eqn.rhs(r,u)
 
-        res  = zero(y)
+        res  = Array(T,npts*eqn.npde+npts+1)
         res[1]          = dt-gval # Sundman transform equations
         res[2:npts+1]   = movingmeshres(r,dr,M,gamma,gval,eps) # moving mesh equations
         physicalres!(resu,rhs,r,u,dudt,gval) # physical equations
@@ -172,7 +177,10 @@ function solve(eqn   :: Equation,
         t = y[1];
         x = y[2:npts+1]
         u = reshape(y[npts+2:end],npts,eqn.npde)
-        return t, x, u
+        dt = yt[1];
+        dx = yt[2:npts+1]/dt
+        du = reshape(yt[npts+2:end],npts,eqn.npde)/dt
+        return t, x, u, dt, dx, du
     end
 
     sol = dasslIterator(dae, y0, zero(T); args...)
