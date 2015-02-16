@@ -167,6 +167,8 @@ function solve(eqn   :: Equation,
         res  = Array(T,npts*eqn.npde+npts+1)
         res[1]          = dt-gval # Sundman transform equations
         res[2:npts+1]   = movingmeshres(r,dr,M,gamma,gval,eps) # moving mesh equations
+        res[2]      = eqn.Bxl(r[1],dr[1],u[1,:],dudr[1,:],M)
+        res[npts+1] = eqn.Bxr(r[end],dr[end],u[end,:],dudr[end,:],M)
         physicalres!(resu,rhs,r,u,dudt,gval) # physical equations
         res[npts+2:end] = vec(resu)
 
